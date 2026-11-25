@@ -234,13 +234,15 @@ async def handle_callbacks(update, context):
 
     data = query.data
 
-    if data.startswith("transpose_"):
-        direction, amount = data.split("_")[1:]
+if data.startswith("transpose_"):
+    parts = data.split("_")
+    direction = parts[1]
+    amount = int(parts[2])
 
-        semitones = int(amount)
+    semitones = amount
 
-        if direction == "down":
-            semitones = -semitones
+    if direction == "down":
+        semitones = -semitones
 
         answer = guitar_tools.format_transposed_chords(
             chords_list,
@@ -280,7 +282,8 @@ async def handle_text(update, context):
         )
 
     elif message == "🎸 Инструменты":
-        context.user_data.clear()
+    context.user_data["awaiting_ai"] = False
+    context.user_data["awaiting_shape"] = False
 
         await update.message.reply_text(
             "🎸 Выбери инструмент:",
@@ -327,7 +330,8 @@ async def handle_text(update, context):
         )
 
     elif message == "⬅️ Главное меню":
-        context.user_data.clear()
+    context.user_data["awaiting_ai"] = False
+    context.user_data["awaiting_shape"] = False
 
         await update.message.reply_text(
             "Главное меню 🎸",
