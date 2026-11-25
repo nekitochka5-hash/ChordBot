@@ -1,0 +1,49 @@
+"""Инструменты для управления профилем."""
+
+import database
+
+
+def add_chord(user_id, chord):
+    profile = database.get_profile(user_id)
+
+    chords = profile["known_chords"]
+
+    if chord not in chords:
+        chords.append(chord)
+
+    database.update_profile(
+        user_id,
+        known_chords=chords
+    )
+
+    return chords
+
+
+def remove_chord(user_id, chord):
+    profile = database.get_profile(user_id)
+
+    chords = profile["known_chords"]
+
+    if chord in chords:
+        chords.remove(chord)
+
+    database.update_profile(
+        user_id,
+        known_chords=chords
+    )
+
+    return chords
+
+
+def set_goals(user_id, goals):
+    database.update_profile(
+        user_id,
+        goals=goals
+    )
+
+
+def set_experience(user_id, experience):
+    database.update_profile(
+        user_id,
+        experience=experience
+    )
