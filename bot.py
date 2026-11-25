@@ -282,8 +282,8 @@ async def handle_text(update, context):
         )
 
     elif message == "🎸 Инструменты":
-    context.user_data["awaiting_ai"] = False
-    context.user_data["awaiting_shape"] = False
+        context.user_data["awaiting_ai"] = False
+        context.user_data["awaiting_shape"] = False
 
         await update.message.reply_text(
             "🎸 Выбери инструмент:",
@@ -330,8 +330,8 @@ async def handle_text(update, context):
         )
 
     elif message == "⬅️ Главное меню":
-    context.user_data["awaiting_ai"] = False
-    context.user_data["awaiting_shape"] = False
+        context.user_data["awaiting_ai"] = False
+        context.user_data["awaiting_shape"] = False
 
         await update.message.reply_text(
             "Главное меню 🎸",
