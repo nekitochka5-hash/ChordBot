@@ -1,82 +1,369 @@
-"""Telegram-бот: присылаете песню, получаете аккорды."""
+
+"""Главный файл Telegram-бота AI Гитара."""
+
 import asyncio
 import logging
 import os
+import re
 import tempfile
 
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+)
 
 import chords
+import keyboards
+import chord_shapes
+import guitar_tools
+import database
+import ai_guitarist
+import profile_tools
 
-logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
-log = logging.getLogger("chordbot")
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(message)s",
+    level=logging.INFO,
+)
 
-MAX_BYTES = 20 * 1024 * 1024  # Telegram не даёт ботам скачивать файлы больше 20 МБ
-AUDIO_EXT = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".opus", ".aac", ".wma", ".mp4")
-ANALYSIS_LIMIT = asyncio.Semaphore(1)  # анализ тяжёлый: обрабатываем по одной песне
+log = logging.getLogger("ai_guitar")
+
+MAX_BYTES = 20 * 1024 * 1024
+AUDIO_EXT = (
+    ".mp3", ".wav", ".flac", ".m4a", ".ogg",
+    ".opus", ".aac", ".wma", ".mp4"
+)
+
+ANALYSIS_LIMIT = asyncio.Semaphore(1)
 
 WELCOME = (
-    "Привет! Я слушаю песни и подбираю аккорды 🎸\n\n"
-    "Пришлите мне аудиофайл (mp3, wav, m4a, ogg) — до 20 МБ. "
-    "Я отвечу тональностью, основными аккордами и аккордами по времени.\n\n"
-    "Лучше всего получается на песнях с чётким звуком гитары, пианино или группы."
+    "Привет! Я AI Гитара 🎸\n\n"
+    "Я помогу тебе разбирать песни, учиться играть "
+    "и работать с аккордами.\n\n"
+    "Выбирай нужный раздел в меню ниже!"
 )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(WELCOME)
+    context.user_data.clear()
+    await update.message.reply_text(
+        WELCOME,
+        reply_markup=keyboards.main_menu(),
+    )
 
 
-async def text_hint(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Пришлите аудиофайл с песней, и я подберу аккорды.")
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎸 AI Гитара — твой музыкальный помощник.\n\n"
+        "🎵 Подбор аккордов — отправь аудиофайл.\n"
+        "🤖 AI Гитарист — вопросы о гитаре и музыке.\n"
+        "🎸 Инструменты — транспонирование и аппликатуры.\n"
+        "👤 Мой профиль — твой прогресс.\n\n"
+        "Команды профиля:\n"
+        "/addchord Am — добавить знакомый аккорд\n"
+        "/goal текст — записать цель\n"
+        "/level текст — изменить уровень.",
+        reply_markup=keyboards.main_menu(),
+    )
 
 
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_profile(update, context):
+    user_id = update.effective_user.id
+
+    await update.effective_message.reply_text(
+        database.format_profile(user_id),
+        reply_markup=keyboards.main_menu(),
+    )
+
+
+async def add_chord_command(update, context):
+    if not context.args:
+        await update.message.reply_text(
+            "Напиши, например: /addchord Am"
+        )
+        return
+
+    chord = context.args[0]
+
+    profile_tools.add_chord(
+        update.effective_user.id,
+        chord,
+    )
+
+    await update.message.reply_text(
+        f"🎸 Аккорд {chord} добавлен в твой профиль!"
+    )
+
+
+async def goal_command(update, context):
+    if not context.args:
+        await update.message.reply_text(
+            "Напиши цель после команды /goal"
+        )
+        return
+
+    goal = " ".join(context.args)
+
+    profile_tools.set_goals(
+        update.effective_user.id,
+        goal,
+    )
+
+    await update.message.reply_text("🎯 Цель сохранена!")
+
+
+async def level_command(update, context):
+    if not context.args:
+        await update.message.reply_text(
+            "Напиши свой уровень после команды /level"
+        )
+        return
+
+    level = " ".join(context.args)
+
+    profile_tools.set_experience(
+        update.effective_user.id,
+        level,
+    )
+
+    await update.message.reply_text("🎸 Уровень обновлён!")
+
+
+async def handle_audio(update, context):
     msg = update.message
-    media = msg.audio or msg.voice or msg.document
+    media = msg.audio or msg.document
+
     if media is None:
         return
+
     if msg.document:
         name = (msg.document.file_name or "").lower()
         mime = msg.document.mime_type or ""
-        if not (name.endswith(AUDIO_EXT) or mime.startswith("audio/")):
-            await msg.reply_text("Это не похоже на аудио. Пришлите mp3, wav, m4a или ogg.")
+
+        if not (
+            name.endswith(AUDIO_EXT)
+            or mime.startswith("audio/")
+        ):
+            await msg.reply_text(
+                "Это не похоже на аудиофайл. "
+                "Пришли MP3, WAV, FLAC или другой аудиоформат."
+            )
             return
+
     if media.file_size and media.file_size > MAX_BYTES:
-        await msg.reply_text("Файл больше 20 МБ — Telegram не разрешает мне его скачать. "
-                             "Сожмите в mp3 и пришлите ещё раз.")
+        await msg.reply_text(
+            "Файл больше 20 МБ. Попробуй отправить его в меньшем размере."
+        )
         return
 
-    status = await msg.reply_text("Слушаю… обычно это занимает от 20 секунд до минуты ⏳")
-    await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
+    status = await msg.reply_text(
+        "🎧 Слушаю песню и подбираю аккорды..."
+    )
+
+    await context.bot.send_chat_action(
+        msg.chat_id,
+        ChatAction.TYPING,
+    )
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "input")
+
             tg_file = await media.get_file()
             await tg_file.download_to_drive(path)
+
             async with ANALYSIS_LIMIT:
-                result = await asyncio.to_thread(chords.analyze, path)
+                result = await asyncio.to_thread(
+                    chords.analyze,
+                    path,
+                )
+
         parts = chords.format_result(result)
-    except ValueError as e:
-        await status.edit_text(f"Не получилось: {e}")
-        return
+
+        main_chords = result.get("main_chords", [])
+
+        if isinstance(main_chords, str):
+            main_chords = re.findall(
+                r"[A-G](?:#|b)?m?",
+                main_chords,
+            )
+
+        context.user_data["last_chords"] = list(main_chords)
+
+        for part in parts:
+            await msg.reply_text(
+                part,
+                parse_mode=ParseMode.HTML,
+            )
+
+        if main_chords:
+            await msg.reply_text(
+                "Что хочешь сделать с найденными аккордами?",
+                reply_markup=keyboards.chord_actions(),
+            )
+
+        await status.delete()
+
+    except ValueError as error:
+        await status.edit_text(f"Не получилось: {error}")
+
     except Exception:
-        log.exception("Ошибка при анализе")
-        await status.edit_text("Что-то пошло не так на моей стороне. Попробуйте другой файл.")
+        log.exception("Ошибка при анализе аудио")
+
+        await status.edit_text(
+            "Что-то пошло не так. Попробуй другой аудиофайл."
+        )
+
+
+async def handle_callbacks(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    chords_list = context.user_data.get("last_chords", [])
+
+    if not chords_list:
+        await query.message.reply_text(
+            "Сначала отправь песню, чтобы получить аккорды."
+        )
         return
 
-    for part in parts:
-        await msg.reply_text(part, parse_mode=ParseMode.HTML)
-    await status.delete()
+    data = query.data
+
+    if data.startswith("transpose_"):
+        direction, amount = data.split("_")[1:]
+
+        semitones = int(amount)
+
+        if direction == "down":
+            semitones = -semitones
+
+        answer = guitar_tools.format_transposed_chords(
+            chords_list,
+            semitones,
+        )
+
+        await query.message.reply_text(answer)
+
+    elif data == "simplify_chords":
+        unique_chords = list(dict.fromkeys(chords_list))
+
+        for chord in unique_chords:
+            answer = guitar_tools.format_simplified_chord(chord)
+
+            await query.message.reply_text(answer)
+
+
+async def handle_text(update, context):
+    message = update.message.text
+    user_id = update.effective_user.id
+
+    if message == "🎵 Подобрать аккорды":
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "🎵 Отправь аудиофайл с песней. "
+            "Я попробую определить тональность и аккорды."
+        )
+
+    elif message == "🤖 AI Гитарист":
+        context.user_data["awaiting_ai"] = True
+
+        await update.message.reply_text(
+            "🤖 AI Гитарист на связи!\n\n"
+            "Задай вопрос о гитаре, аккордах, "
+            "музыкальной теории или написании песен."
+        )
+
+    elif message == "🎸 Инструменты":
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "🎸 Выбери инструмент:",
+            reply_markup=keyboards.tools_menu(),
+        )
+
+    elif message == "👤 Мой профиль":
+        await show_profile(update, context)
+
+    elif message == "ℹ️ Помощь":
+        await help_command(update, context)
+
+    elif message == "🔄 Транспонировать аккорды":
+        chords_list = context.user_data.get("last_chords", [])
+
+        if not chords_list:
+            await update.message.reply_text(
+                "Сначала отправь песню и получи аккорды."
+            )
+        else:
+            await update.message.reply_text(
+                "Выбери, насколько изменить тональность:",
+                reply_markup=keyboards.chord_actions(),
+            )
+
+    elif message == "🎼 Упростить аккорды":
+        chords_list = context.user_data.get("last_chords", [])
+
+        if not chords_list:
+            await update.message.reply_text(
+                "Сначала отправь песню и получи аккорды."
+            )
+        else:
+            for chord in dict.fromkeys(chords_list):
+                await update.message.reply_text(
+                    guitar_tools.format_simplified_chord(chord)
+                )
+
+    elif message == "🎸 Схемы аккордов":
+        context.user_data["awaiting_shape"] = True
+
+        await update.message.reply_text(
+            "Напиши название аккорда, например Am, C, G или F."
+        )
+
+    elif message == "⬅️ Главное меню":
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "Главное меню 🎸",
+            reply_markup=keyboards.main_menu(),
+        )
+
+    elif context.user_data.get("awaiting_shape"):
+        chord = message.strip()
+
+        answer = chord_shapes.format_chord_shape(chord)
+
+        await update.message.reply_text(answer)
+
+        context.user_data["awaiting_shape"] = False
+
+    elif context.user_data.get("awaiting_ai"):
+        answer = ai_guitarist.get_response(message)
+
+        await update.message.reply_text(answer)
+
+    else:
+        await update.message.reply_text(
+            "Выбери раздел в меню или нажми «Помощь»."
+        )
 
 
 def main():
     token = os.environ.get("BOT_TOKEN")
+
     if not token:
-        raise SystemExit("Не задан BOT_TOKEN. Укажите токен от @BotFather (см. README.md).")
+        raise SystemExit(
+            "Не задан BOT_TOKEN. Проверь переменные Railway."
+        )
+
+    database.init_db()
+
     app = (
         Application.builder()
         .token(token)
@@ -86,10 +373,33 @@ def main():
         .connect_timeout(30)
         .build()
     )
-    app.add_handler(CommandHandler(["start", "help"], start))
-    app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_audio))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_hint))
-    log.info("Бот запущен")
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("addchord", add_chord_command))
+    app.add_handler(CommandHandler("goal", goal_command))
+    app.add_handler(CommandHandler("level", level_command))
+
+    app.add_handler(
+        CallbackQueryHandler(handle_callbacks)
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.AUDIO | filters.Document.ALL,
+            handle_audio,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_text,
+        )
+    )
+
+    log.info("AI Гитара запущен")
+
     app.run_polling()
 
 
