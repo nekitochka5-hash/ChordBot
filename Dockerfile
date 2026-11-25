@@ -1,3 +1,4 @@
+
 FROM python:3.12-slim
 
 RUN apt-get update \
@@ -5,8 +6,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY chords.py bot.py ./
+COPY *.py ./
+
 CMD ["python", "bot.py"]
